@@ -14,8 +14,11 @@ import feedparser
 import requests
 
 
+# ================================================
+# SAHM MARKET NEWS — LIVE DISCORD AUTOMATION
+# ================================================
+
 STATE_FILE = Path("seen_news.json")
-DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
 MAX_POSTS_PER_MARKET = 2
 MAX_ARTICLE_AGE_HOURS = 12
@@ -25,7 +28,7 @@ MARKETS = {
     "saudi": {
         "name": "🇸🇦 أخبار السوق السعودي",
         "color": 0x1FA36B,
-        "secret": "SAUDI_NEWS_WEBHOOK",
+        "webhook_secret": "SAUDI_NEWS_WEBHOOK",
         "query": (
             "(تاسي OR تداول OR أرامكو OR الراجحي "
             "OR الأسهم السعودية) when:1d"
@@ -34,7 +37,7 @@ MARKETS = {
     "us": {
         "name": "🇺🇸 أخبار السوق الأمريكي",
         "color": 0x3478C0,
-        "secret": "US_NEWS_WEBHOOK",
+        "webhook_secret": "US_NEWS_WEBHOOK",
         "query": (
             "(وول ستريت OR ناسداك OR S&P 500 "
             "OR الفيدرالي الأمريكي OR الأسهم الأمريكية) "
@@ -44,23 +47,40 @@ MARKETS = {
 }
 
 
+# ================================================
+# LOAD PREVIOUSLY PUBLISHED NEWS
+# ================================================
+
 def load_state():
     if not STATE_FILE.exists():
-        return {"saudi": [], "us": []}
+        return {
+            market: []
+            for market in MARKETS
+        }
 
-    with STATE_FILE.open("r", encoding="utf-8") as file:
+    with STATE_FILE.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
         saved = json.load(file)
 
     return {
-        key: saved.get(key, [])
-        for key in MARKETS
+        market: saved.get(market, [])
+        for market in MARKETS
     }
 
 
-def save_state(state):
-    temporary = STATE_FILE.with_suffix(".tmp")
+# ================================================
+# SAVE PUBLISHED NEWS HISTORY
+# ================================================
 
-    with temporary.open("w", encoding="utf-8") as file:
+def save_state(state):
+    temporary_file = STATE_FILE.with_suffix(".tmp")
+
+    with temporary_file.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
         json.dump(
             state,
             file,
@@ -68,8 +88,12 @@ def save_state(state):
             indent=2,
         )
 
-    temporary.replace(STATE_FILE)
+    temporary_file.replace(STATE_FILE)
 
+
+# ================================================
+# FETCH ARABIC FINANCIAL NEWS
+# ================================================
 
 def fetch_news(query):
     parameters = urlencode({
@@ -86,50 +110,79 @@ def fetch_news(query):
 
     response = requests.get(
         url,
-        timeout=30,
         headers={
             "User-Agent": "SahmMarketNews/1.0"
         },
+        timeout=30,
     )
+
     response.raise_for_status()
 
-    feed = feedparser.parse(response.content)
+    feed = feedparser.parse(
+        response.content
+    )
 
     if feed.bozo and not feed.entries:
-        raise RuntimeError("RSS feed could not be parsed")
+        raise RuntimeError(
+            "Unable to parse Google News RSS"
+        )
 
     return feed.entries
 
 
-def published_at(entry):
-    raw = entry.get("published")
+# ================================================
+# ARTICLE PUBLICATION DATE
+# ================================================
 
-    if not raw:
+def get_publication_date(entry):
+    raw_date = entry.get("published")
+
+    if not raw_date:
         return None
 
     try:
-        date = parsedate_to_datetime(raw)
+        published = parsedate_to_datetime(
+            raw_date
+        )
 
-        if date.tzinfo is None:
-            date = date.replace(tzinfo=timezone.utc)
+        if published.tzinfo is None:
+            published = published.replace(
+                tzinfo=timezone.utc
+            )
 
-        return date.astimezone(timezone.utc)
+        return published.astimezone(
+            timezone.utc
+        )
+
     except (ValueError, TypeError):
         return None
 
 
+# ================================================
+# CLEAN ARTICLE TITLE
+# ================================================
+
 def clean_title(raw_title, source):
-    title = re.sub(r"\s+", " ", raw_title).strip()
+    title = re.sub(
+        r"\s+",
+        " ",
+        raw_title,
+    ).strip()
 
-    suffix = f" - {source}"
+    if source:
+        suffix = f" - {source}"
 
-    if source and title.endswith(suffix):
-        title = title[:-len(suffix)]
+        if title.endswith(suffix):
+            title = title[:-len(suffix)]
 
     return title.strip()
 
 
-def article_identifier(title):
+# ================================================
+# CREATE UNIQUE ARTICLE IDENTIFIER
+# ================================================
+
+def get_article_id(title):
     normalized = re.sub(
         r"\s+",
         " ",
@@ -141,15 +194,17 @@ def article_identifier(title):
     ).hexdigest()
 
 
-def build_embed(market, article):
+# ================================================
+# CREATE PROFESSIONAL DISCORD EMBED
+# ================================================
+
+def create_embed(market, article):
     config = MARKETS[market]
 
-    # Google News RSS doesn't reliably provide
-    # a factual article summary. Avoid inventing one.
     description = (
-        "📌 **متابعة الخبر**\n"
-        "اطّلع على التفاصيل الكاملة من المصدر "
-        "عبر الرابط الموجود في عنوان الخبر."
+        "📌 **تفاصيل الخبر**\n"
+        "للاطلاع على التفاصيل الكاملة، "
+        "اضغط على عنوان الخبر لزيارة المصدر."
     )
 
     return {
@@ -168,86 +223,138 @@ def build_embed(market, article):
             },
         ],
         "footer": {
-            "text": "ديوانية سهم | أخبار الأسواق",
+            "text": (
+                "ديوانية سهم | أخبار الأسواق"
+            ),
         },
-        "timestamp": article["date"].isoformat(),
+        "timestamp": (
+            article["published_at"].isoformat()
+        ),
     }
 
 
-def send_to_discord(market, article):
-    secret_name = MARKETS[market]["secret"]
-    webhook = os.getenv(secret_name)
+# ================================================
+# SEND NEWS TO DISCORD
+# ================================================
 
-    if not webhook:
+def send_to_discord(market, article):
+    secret_name = MARKETS[market][
+        "webhook_secret"
+    ]
+
+    webhook_url = os.getenv(secret_name)
+
+    if not webhook_url:
         raise RuntimeError(
             f"Missing GitHub secret: {secret_name}"
         )
 
     payload = {
-        "embeds": [build_embed(market, article)],
+        "embeds": [
+            create_embed(market, article)
+        ],
         "allowed_mentions": {
             "parse": []
         },
     }
 
-    # Do not send username or avatar_url.
-    # Discord will use the webhook's saved identity.
+    # Discord automatically uses the webhook
+    # name and avatar configured in Discord.
+    # Do not override username or avatar_url.
 
     for attempt in range(3):
         response = requests.post(
-            webhook,
-            params={"wait": "true"},
+            webhook_url,
+            params={
+                "wait": "true"
+            },
             json=payload,
             timeout=30,
         )
 
         if response.status_code == 429:
-            delay = float(
-                response.json().get("retry_after", 2)
+            try:
+                delay = float(
+                    response.json().get(
+                        "retry_after",
+                        2,
+                    )
+                )
+            except (
+                ValueError,
+                TypeError,
+            ):
+                delay = 2
+
+            time.sleep(
+                min(max(delay, 1), 30)
             )
-            time.sleep(min(delay, 30))
             continue
 
         response.raise_for_status()
 
-        message = response.json()
+        result = response.json()
 
-        if not message.get("id"):
+        if not result.get("id"):
             raise RuntimeError(
-                "Discord did not confirm the message"
+                "Discord did not confirm the post"
             )
 
-        return
+        return result["id"]
 
     raise RuntimeError(
         "Discord rate limit retries exhausted"
     )
 
 
+# ================================================
+# PROCESS MARKET NEWS
+# ================================================
+
 def process_market(market, state):
     config = MARKETS[market]
 
-    print(f"Checking: {config['name']}")
+    print(
+        f"\nChecking {config['name']}"
+    )
 
-    entries = fetch_news(config["query"])
+    entries = fetch_news(
+        config["query"]
+    )
 
-    cutoff = datetime.now(
-        timezone.utc
-    ) - timedelta(hours=MAX_ARTICLE_AGE_HOURS)
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(
+            hours=MAX_ARTICLE_AGE_HOURS
+        )
+    )
 
-    seen = set(state[market])
-    candidates = []
+    already_posted = set(
+        state[market]
+    )
+
     current_batch = set()
+    candidates = []
 
     for entry in entries:
-        date = published_at(entry)
+        published_at = get_publication_date(
+            entry
+        )
 
-        if date is None or date < cutoff:
+        if published_at is None:
             continue
 
-        source_data = entry.get("source", {})
+        if published_at < cutoff:
+            continue
+
+        source_data = entry.get(
+            "source",
+            {},
+        )
+
         source = source_data.get(
-            "title", "ناشر غير محدد"
+            "title",
+            "مصدر غير محدد",
         )
 
         title = clean_title(
@@ -255,82 +362,142 @@ def process_market(market, state):
             source,
         )
 
-        link = entry.get("link", "")
+        link = entry.get(
+            "link",
+            "",
+        )
 
-        if not title or not link.startswith("https://"):
+        if not title:
             continue
 
-        identifier = article_identifier(title)
-
-        if identifier in seen:
+        if not link.startswith(
+            "https://"
+        ):
             continue
 
-        if identifier in current_batch:
+        article_id = get_article_id(
+            title
+        )
+
+        if article_id in already_posted:
             continue
 
-        current_batch.add(identifier)
+        if article_id in current_batch:
+            continue
+
+        current_batch.add(
+            article_id
+        )
 
         candidates.append({
-            "id": identifier,
+            "id": article_id,
             "title": title,
             "source": source,
             "link": link,
-            "date": date,
+            "published_at": published_at,
         })
 
-    # Publish newest items first.
+    # Publish newest articles first
     candidates.sort(
-        key=lambda item: item["date"],
+        key=lambda article: (
+            article["published_at"]
+        ),
         reverse=True,
     )
 
-    count = 0
+    selected = candidates[
+        :MAX_POSTS_PER_MARKET
+    ]
 
-    for article in candidates[:MAX_POSTS_PER_MARKET]:
-        if DRY_RUN:
-            print(
-                f"TEST ONLY [{market}]: "
-                f"{article['title']}"
-            )
-            continue
+    print(
+        f"Found {len(selected)} "
+        f"new articles for {market}"
+    )
 
-        send_to_discord(market, article)
+    published_count = 0
 
-        state[market].append(article["id"])
-        state[market] = state[market][-MAX_SAVED_IDS:]
+    for article in selected:
 
-        save_state(state)
+        # LIVE DISCORD PUBLISHING
+        message_id = send_to_discord(
+            market,
+            article,
+        )
 
-        count += 1
+        # Save identifier only after successful post
+        state[market].append(
+            article["id"]
+        )
+
+        state[market] = state[
+            market
+        ][-MAX_SAVED_IDS:]
+
+        save_state(
+            state
+        )
+
+        published_count += 1
 
         print(
-            f"POSTED [{market}]: "
-            f"{article['title']}"
+            f"POSTED [{market}] "
+            f"{article['title']} "
+            f"(Discord ID: {message_id})"
         )
 
     print(
-        f"{market}: {count} articles published"
+        f"{market}: "
+        f"{published_count} posts published"
     )
 
 
+# ================================================
+# MAIN — RUN BOTH MARKETS
+# ================================================
+
 def main():
+    print(
+        "================================="
+    )
+    print(
+        "SAHM MARKET NEWS — LIVE"
+    )
+    print(
+        "================================="
+    )
+
     state = load_state()
-    errors = []
+
+    failed_markets = []
 
     for market in MARKETS:
         try:
-            process_market(market, state)
+            process_market(
+                market,
+                state,
+            )
+
         except Exception as error:
             print(
                 f"ERROR [{market}]: {error}",
                 file=sys.stderr,
             )
-            errors.append(market)
 
-    if errors:
+            failed_markets.append(
+                market
+            )
+
+    if failed_markets:
         raise RuntimeError(
-            "Failed markets: " + ", ".join(errors)
+            "Failed markets: "
+            + ", ".join(
+                failed_markets
+            )
         )
+
+    print(
+        "\nLive news automation completed."
+    )
 
 
 if __name__ == "__main__":
