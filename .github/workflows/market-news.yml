@@ -1,0 +1,67 @@
+
+name: Sahm Market News
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Every hour at minute 17, Riyadh time
+    - cron: "17 * * * *"
+      timezone: "Asia/Riyadh"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sahm-market-news
+  cancel-in-progress: false
+
+jobs:
+  publish-news:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto-core
+          python -m pip install \
+            requests \
+            feedparser \
+            Pillow \
+            arabic-reshaper \
+            python-bidi
+
+      - name: Run market news bot
+        env:
+          SAUDI_NEWS_WEBHOOK: ${{ secrets.SAUDI_NEWS_WEBHOOK }}
+          US_NEWS_WEBHOOK: ${{ secrets.US_NEWS_WEBHOOK }}
+          DRY_RUN: "true"
+        run: |
+          python news_bot.py
+
+      - name: Save published news history
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add seen_news.json
+
+          if git diff --cached --quiet; then
+            echo "No new history to save"
+          else
+            git commit -m "Update published news history"
+            git push
+          fi
